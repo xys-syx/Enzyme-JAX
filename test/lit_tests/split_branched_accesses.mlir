@@ -81,6 +81,30 @@ module {
     memref.store %v, %m[%i] : memref<?xf64>
     return
   }
+
+  // an affine access whose index arithmetic stays in the index type has a
+  // valid index in each arm and is split
+  func.func @affine_index_chain(%m: memref<?xi32>, %s: index, %d: index) -> i32 {
+    %c1 = arith.constant 1 : index
+    %c3 = arith.constant 3 : index
+    %x = affine.if #set()[%s] -> index { affine.yield %c3 : index } else { affine.yield %d : index }
+    %i = arith.addi %x, %c1 : index
+    %v = affine.load %m[symbol(%i)] : memref<?xi32>
+    return %v : i32
+  }
+
+  // index arithmetic through i32 gives no valid affine index inside an arm,
+  // as a symbol or as a dimension, so these accesses are left alone
+  func.func @affine_index_from_i32(%m: memref<?xi32>, %s: index, %a: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %x = affine.if #set()[%s] -> i32 { affine.yield %a : i32 } else { affine.yield %c3_i32 : i32 }
+    %e = arith.extui %x : i32 to i64
+    %i = arith.index_cast %e : i64 to index
+    %v = affine.load %m[symbol(%i)] : memref<?xi32>
+    %w = affine.load %m[%i] : memref<?xi32>
+    %r = arith.addi %v, %w : i32
+    return %r : i32
+  }
 }
 
 // CHECK:  func.func @scf_load(%[[v1:.+]]: memref<?xi32>, %[[v2:.+]]: i1) -> i32 {
@@ -169,4 +193,32 @@ module {
 // CHECK-NEXT:  memref.store %[[o7]], %[[o6]][%[[o5]]] : memref<?xf64>
 // CHECK-NEXT:  }
 // CHECK-NEXT:  return
+// CHECK-NEXT:  }
+
+// CHECK:  func.func @affine_index_chain(%[[v1:.+]]: memref<?xi32>, %[[v2:.+]]: index, %[[v3:.+]]: index) -> i32 {
+// CHECK-NEXT:  %[[v4:.+]] = arith.constant 1 : index
+// CHECK-NEXT:  %[[v5:.+]] = affine.if #set()[%[[v2]]] -> i32 {
+// CHECK-NEXT:  %[[v6:.+]] = affine.load %[[v1]][4] : memref<?xi32>
+// CHECK-NEXT:  affine.yield %[[v6]] : i32
+// CHECK-NEXT:  } else {
+// CHECK-NEXT:  %[[v7:.+]] = arith.addi %[[v3]], %[[v4]] : index
+// CHECK-NEXT:  %[[v8:.+]] = affine.load %[[v1]][symbol(%[[v7]])] : memref<?xi32>
+// CHECK-NEXT:  affine.yield %[[v8]] : i32
+// CHECK-NEXT:  }
+// CHECK-NEXT:  return %[[v5]] : i32
+// CHECK-NEXT:  }
+
+// CHECK:  func.func @affine_index_from_i32(%[[v1:.+]]: memref<?xi32>, %[[v2:.+]]: index, %[[v3:.+]]: i32) -> i32 {
+// CHECK-NEXT:  %[[v4:.+]] = arith.constant 3 : i32
+// CHECK-NEXT:  %[[v5:.+]] = affine.if #set()[%[[v2]]] -> i32 {
+// CHECK-NEXT:  affine.yield %[[v3]] : i32
+// CHECK-NEXT:  } else {
+// CHECK-NEXT:  affine.yield %[[v4]] : i32
+// CHECK-NEXT:  }
+// CHECK-NEXT:  %[[v6:.+]] = arith.extui %[[v5]] : i32 to i64
+// CHECK-NEXT:  %[[v7:.+]] = arith.index_cast %[[v6]] : i64 to index
+// CHECK-NEXT:  %[[v8:.+]] = affine.load %[[v1]][symbol(%[[v7]])] : memref<?xi32>
+// CHECK-NEXT:  %[[v9:.+]] = affine.load %[[v1]][symbol(%[[v7]])] : memref<?xi32>
+// CHECK-NEXT:  %[[v10:.+]] = arith.addi %[[v8]], %[[v9]] : i32
+// CHECK-NEXT:  return %[[v10]] : i32
 // CHECK-NEXT:  }

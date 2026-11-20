@@ -131,8 +131,35 @@ static Operation *makeIfLike(OpBuilder &builder, Operation *ifOp,
                                     /*withElseRegion=*/true);
 }
 
+/// Whether an affine access can take its map operands where it stands. Each
+/// must be a dimension where the map has a dimension and a symbol where it has
+/// a symbol, by the test the verifier applies. A memref access takes any
+/// index.
+static bool indexValidWhereItStands(Operation *access) {
+  AffineMap map;
+  ValueRange operands;
+  if (auto ld = dyn_cast<affine::AffineLoadOp>(access)) {
+    map = ld.getAffineMap();
+    operands = ld.getMapOperands();
+  } else if (auto st = dyn_cast<affine::AffineStoreOp>(access)) {
+    map = st.getAffineMap();
+    operands = st.getMapOperands();
+  } else {
+    return true;
+  }
+  Region *scope = affine::getAffineScope(access);
+  for (auto [pos, operand] : llvm::enumerate(operands)) {
+    bool valid = pos < map.getNumDims() ? affine::isValidDim(operand, scope)
+                                        : affine::isValidSymbol(operand, scope);
+    if (!valid)
+      return false;
+  }
+  return true;
+}
+
 /// Rebuilds `access`, and the index arithmetic it was reached through, in
-/// each arm of a copy of `br.ifOp`, at the value that arm chose.
+/// each arm of a copy of `br.ifOp`, at the value that arm chose. An access
+/// that could not take its rebuilt index in an arm is left as it was.
 static void splitAccess(Operation *access, const BranchedIndex &br) {
   // The branch is asked again where the access already stands, rather than
   // the access being carried up to where the branch was: everything the
@@ -144,6 +171,7 @@ static void splitAccess(Operation *access, const BranchedIndex &br) {
   Operation *newIf = makeIfLike(builder, br.ifOp, access->getResultTypes());
 
   // The regions of both flavours of if are the arms, in order.
+  SmallVector<Operation *, 2> rebuilt;
   for (unsigned arm = 0; arm < 2; ++arm) {
     Block *body = &newIf->getRegion(arm).front();
     OpBuilder armBuilder(body, body->begin());
@@ -159,6 +187,7 @@ static void splitAccess(Operation *access, const BranchedIndex &br) {
     for (Operation *op : br.chain)
       armBuilder.clone(*op, map);
     Operation *cloned = armBuilder.clone(*access, map);
+    rebuilt.push_back(cloned);
     if (cloned->getNumResults()) {
       if (isa<scf::IfOp>(newIf))
         scf::YieldOp::create(armBuilder, access->getLoc(),
@@ -167,6 +196,17 @@ static void splitAccess(Operation *access, const BranchedIndex &br) {
         affine::AffineYieldOp::create(armBuilder, access->getLoc(),
                                       cloned->getResults());
     }
+  }
+
+  // At the top level of an affine scope any index value is a symbol. The index
+  // arithmetic redone in an arm is below that level, where a value is a symbol
+  // only when it is a constant or is computed, without side effects, from
+  // index values that are symbols. Arithmetic that passes through another
+  // integer type, as an i32 index does before its cast to index, gives a value
+  // that is neither a symbol nor a dimension there.
+  if (!llvm::all_of(rebuilt, indexValidWhereItStands)) {
+    newIf->erase();
+    return;
   }
 
   access->replaceAllUsesWith(newIf->getResults());

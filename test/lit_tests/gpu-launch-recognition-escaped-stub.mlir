@@ -1,4 +1,5 @@
 // RUN: enzymexlamlir-opt %s --pass-pipeline="builtin.module(gpu-launch-recognition)" | FileCheck %s
+// RUN: enzymexlamlir-opt %s --pass-pipeline="builtin.module(gpu-launch-recognition,symbol-dce,parallel-lower{wrapParallelOps=true})" | FileCheck %s --check-prefix=LOWER
 
 // The kernel address user code holds is that of clang's host stub. Here it
 // escapes into a call rather than reaching a runtime query directly, so
@@ -29,3 +30,12 @@ module attributes {gpu.container_module} {
 }
 
 // CHECK: gpu.func @reactant$_Z16__device_stub__kPi(%{{.+}}: !llvm.ptr {{.*}}) kernel
+// CHECK-LABEL: llvm.func @user()
+// CHECK-NEXT: %[[ADDR:.+]] = "enzymexla.gpu_kernel_address"() <{fn = @__mlir_gpu_module::@reactant$_Z16__device_stub__kPi}> : () -> !llvm.ptr
+// CHECK-NEXT: llvm.call @escape(%[[ADDR]])
+
+// The escaped address names the kernel, so parallel-lower sees the capture
+// and leaves the launch alone rather than raising it again.
+// LOWER-NOT: enzymexla.gpu_wrapper
+// LOWER: gpu.launch_func @__mlir_gpu_module::@reactant$_Z16__device_stub__kPi
+// LOWER-NOT: enzymexla.gpu_wrapper
